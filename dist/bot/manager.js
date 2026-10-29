@@ -188,6 +188,10 @@ class BotManager {
             const telegramId = ctx.from?.id;
             if (!telegramId)
                 return;
+            if (ctx.chat.type !== 'private') {
+                await ctx.reply('Botni ochish va guruh kodini kiritish uchun botga shaxsiy xabarda /start yuboring.');
+                return;
+            }
             const firstName = ctx.from?.first_name || '';
             const username = ctx.from?.username || '';
             const userRes = await index_js_1.db.query('SELECT * FROM users WHERE telegram_id = $1', [telegramId]);
@@ -199,8 +203,14 @@ class BotManager {
                 await index_js_1.db.query(`UPDATE users SET last_active = CURRENT_TIMESTAMP, first_name = $1, username = $2 WHERE telegram_id = $3`, [firstName, username, telegramId]);
             }
             this.clearSession(telegramId);
-            const langKeyboard = await keyboards_js_1.BotKeyboards.getLanguageKeyboard();
-            await ctx.reply("Assalomu alaykum! Iltimos, tilni tanlang:\n\nПожалуйста, выберите язык:\n\nPlease choose your language:", { reply_markup: langKeyboard });
+            const membership = await index_js_1.db.query('SELECT academy_group_id, academy_group_name FROM users WHERE telegram_id = $1', [telegramId]);
+            const joinedGroup = membership.rows[0]?.academy_group_id;
+            if (joinedGroup) {
+                await ctx.reply(`Assalomu alaykum! <b>${membership.rows[0].academy_group_name || 'Guruhingiz'}</b> uchun botga xush kelibsiz.`, { parse_mode: 'HTML', reply_markup: await keyboards_js_1.BotKeyboards.getMainMenu(await i18n_js_1.I18nService.getUserLanguage(telegramId)) });
+                return;
+            }
+            this.getSession(telegramId).state = 'waiting_group_code';
+            await ctx.reply("Assalomu alaykum! Botdan foydalanish uchun saytdagi guruhingizga biriktirilgan kirish kodini yuboring:");
         });
         bot.command('review', async (ctx) => {
             const telegramId = ctx.from?.id;
@@ -231,12 +241,19 @@ class BotManager {
         bot.callbackQuery(/^set_lang:(.+)$/, async (ctx) => {
             const telegramId = ctx.from.id;
             const langCode = ctx.match[1];
+            const membership = await index_js_1.db.query('SELECT academy_group_id FROM users WHERE telegram_id = $1', [telegramId]);
+            if (!membership.rows[0]?.academy_group_id) {
+                this.getSession(telegramId).state = 'waiting_group_code';
+                await ctx.answerCallbackQuery().catch(() => { });
+                await ctx.reply('Botni ochish uchun avval saytdagi guruhingiz kodini yuboring.');
+                return;
+            }
             await i18n_js_1.I18nService.setUserLanguage(telegramId, langCode);
             await ctx.answerCallbackQuery({ text: '✅ Saqlandi' }).catch(() => { });
             let welcomeText = '';
             if (langCode === 'ru') {
                 welcomeText =
-                    `🌟 <b>Ассаламу алейкум ва рахматуллахи ва баракатух!</b>\n` +
+                    `🌟 <b>Ассаламу алейкум!</b>\n` +
                         `━━━━━━━━━━━━━━━━━━━━\n` +
                         `Добро пожаловать в официальный учебный бот Академии арабского языка <b>Aisha Uzbikiyya</b>.\n\n` +
                         `📖 В меню доступны ежедневные тесты, статистика и AI Учитель по загруженным книгам.\n\n` +
@@ -244,7 +261,7 @@ class BotManager {
             }
             else if (langCode === 'en') {
                 welcomeText =
-                    `🌟 <b>Assalamu alaykum wa rahmatullahi wa barakatuh!</b>\n` +
+                    `🌟 <b>Assalamu alaykum!</b>\n` +
                         `━━━━━━━━━━━━━━━━━━━━\n` +
                         `Welcome to the official learning bot of the <b>Aisha Uzbikiyya</b> Arabic Academy.\n\n` +
                         `📖 Use the menu below for daily quizzes, statistics, and an AI Tutor based on uploaded books.\n\n` +
@@ -252,9 +269,9 @@ class BotManager {
             }
             else {
                 welcomeText =
-                    `🌟 <b>Assalomu alaykum va rahmatullohi va barakatuh!</b>\n` +
+                    `🌟 <b>Assalomu alaykum!</b>\n` +
                         `━━━━━━━━━━━━━━━━━━━━\n` +
-                        `<b>Aisha Uzbikiyya</b> arab tili akademiyasining rasmiy o'quv botiga xush kelibsiz.\n\n` +
+                        `<b>Uzbikiyya akademiyasi o'quvchilari bilan ishlash guruhi.</b>\n\n` +
                         `📖 Menyuda kunlik testlar, statistika va yuklangan kitoblar asosida ishlaydigan AI Ustoz mavjud.\n\n` +
                         `<i>Kerakli bo'limni quyidagi menyudan tanlang:</i>`;
             }
@@ -273,24 +290,18 @@ class BotManager {
                     ? "You are already enrolled. Please use the main menu:"
                     : "Siz allaqachon akademiya o'quvchisiz. Asosiy menyudan foydalaning:", { reply_markup: mainKb });
         });
-        // 5. Guruh tanlash callback (Kirish kodi so'rash)
+        // Eski guruh tugmasi bosilsa ham saytdagi yagona guruh kodi so'raladi.
         bot.callbackQuery(/^join_group:(\d+)$/, async (ctx) => {
             const telegramId = ctx.from.id;
-            const groupId = parseInt(ctx.match[1], 10);
             const lang = await i18n_js_1.I18nService.getUserLanguage(telegramId);
             await ctx.answerCallbackQuery().catch(() => { });
-            const groupRes = await index_js_1.db.query('SELECT * FROM groups WHERE id = $1', [groupId]);
-            if (groupRes.rows.length === 0) {
-                await ctx.reply(lang === 'ru' ? "Группа не найдена." : "Guruh topilmadi.");
-                return;
-            }
             const session = this.getSession(telegramId);
             session.state = 'waiting_group_code';
-            session.selectedGroupId = groupId;
-            const askCodeText = lang === 'ru'
-                ? "Пожалуйста, введите код доступа к группе:"
-                : "Iltimos, guruhga kirish maxsus kodini kiriting:";
-            await ctx.reply(`🔒 <b>${groupRes.rows[0].name}</b>\n━━━━━━━━━━━━━━━━━━━━\n${askCodeText}`, { parse_mode: 'HTML' });
+            await ctx.reply(lang === 'ru'
+                ? 'Введите код группы из единой панели сайта:'
+                : lang === 'en'
+                    ? 'Enter the group code shown in the website admin panel:'
+                    : 'Sayt admin panelidagi guruh kodini yuboring:');
         });
         // 6. Statistika: Bitta tugma bilan ochib-yopish callback (⬇️ / ⬆️)
         bot.callbackQuery(/^toggle_stats:(open|close)$/, async (ctx) => {
@@ -306,7 +317,12 @@ class BotManager {
             await ctx.answerCallbackQuery().catch(() => { });
             await ctx.replyWithChatAction('typing').catch(() => { });
             try {
-                const book = await (0, academySync_js_1.getAcademyBookText)(Number(ctx.match[1]));
+                const membership = await index_js_1.db.query('SELECT academy_group_id FROM users WHERE telegram_id = $1', [telegramId]);
+                const book = await (0, academySync_js_1.getAcademyGroupBook)(Number(membership.rows[0]?.academy_group_id), telegramId);
+                if (book.id !== Number(ctx.match[1])) {
+                    await ctx.reply('Faqat guruhingizga hozir biriktirilgan kitobdan foydalanishingiz mumkin.');
+                    return;
+                }
                 const session = this.getSession(telegramId);
                 session.state = 'chatting_with_ai_tutor';
                 session.activeTutorBookId = Number(ctx.match[1]);
@@ -384,12 +400,13 @@ class BotManager {
                 correctAnswerText,
                 explanation: question.explanation || '',
             });
-            // user_quiz_history jadvaliga saqlash (takrorlanmaslik va mustahkamlash uchun)
+            // Savol tarixi va natijalar guruh kesimida yuritiladi.
             try {
                 await index_js_1.db.query(`INSERT INTO user_quiz_history 
-           (telegram_id, question, topic, is_correct, user_answer, correct_answer, explanation)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`, [
+           (telegram_id, academy_group_id, question, topic, is_correct, user_answer, correct_answer, explanation)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [
                     telegramId,
+                    session.testAcademyGroupId,
                     question.question,
                     topicName,
                     isCorrect,
@@ -403,17 +420,20 @@ class BotManager {
             }
             // Zaif mavzular statistikasi
             try {
-                const topicCheck = await index_js_1.db.query('SELECT id, correct_count, wrong_count FROM user_topic_stats WHERE telegram_id = $1 AND topic = $2', [telegramId, topicName]);
+                const groupId = session.testAcademyGroupId;
+                if (!groupId)
+                    throw new Error('Test sessiyasida guruh aniqlanmagan');
+                const topicCheck = await index_js_1.db.query('SELECT id FROM academy_group_topic_stats WHERE telegram_id = $1 AND academy_group_id = $2 AND topic = $3', [telegramId, groupId, topicName]);
                 if (topicCheck.rows.length > 0) {
                     if (isCorrect) {
-                        await index_js_1.db.query('UPDATE user_topic_stats SET correct_count = correct_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1', [topicCheck.rows[0].id]);
+                        await index_js_1.db.query('UPDATE academy_group_topic_stats SET correct_count = correct_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1', [topicCheck.rows[0].id]);
                     }
                     else {
-                        await index_js_1.db.query('UPDATE user_topic_stats SET wrong_count = wrong_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1', [topicCheck.rows[0].id]);
+                        await index_js_1.db.query('UPDATE academy_group_topic_stats SET wrong_count = wrong_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1', [topicCheck.rows[0].id]);
                     }
                 }
                 else {
-                    await index_js_1.db.query('INSERT INTO user_topic_stats (telegram_id, topic, correct_count, wrong_count) VALUES ($1, $2, $3, $4)', [telegramId, topicName, isCorrect ? 1 : 0, isCorrect ? 0 : 1]);
+                    await index_js_1.db.query('INSERT INTO academy_group_topic_stats (telegram_id, academy_group_id, topic, correct_count, wrong_count) VALUES ($1, $2, $3, $4, $5)', [telegramId, groupId, topicName, isCorrect ? 1 : 0, isCorrect ? 0 : 1]);
                 }
             }
             catch (e) {
@@ -486,8 +506,12 @@ class BotManager {
                 return;
             }
             // Agar guruh kodini kutayotgan bo'lsa
-            if (session.state === 'waiting_group_code' && session.selectedGroupId) {
-                await this.handleGroupCodeVerification(ctx, telegramId, text, session.selectedGroupId, lang);
+            if (session.state === 'waiting_group_code') {
+                if (ctx.chat.type !== 'private') {
+                    await ctx.reply('Guruh kodini bot bilan shaxsiy chatda yuboring.');
+                    return;
+                }
+                await this.handleAcademyGroupCodeVerification(ctx, telegramId, text, lang);
                 return;
             }
             // Agar admin parolini kutayotgan bo'lsa
@@ -514,6 +538,12 @@ class BotManager {
                 await this.handleAdminCommand(ctx, telegramId);
                 return;
             }
+            const membership = await index_js_1.db.query('SELECT academy_group_id FROM users WHERE telegram_id = $1', [telegramId]);
+            if (!membership.rows[0]?.academy_group_id) {
+                session.state = 'waiting_group_code';
+                await ctx.reply('Botdan foydalanish uchun saytdagi guruhingizga biriktirilgan kirish kodini yuboring:');
+                return;
+            }
             // 1. Statistika va Umumiy Reyting menyusi (Barcha guruhlar, bitta tugma orqali ochilib-yopiladi)
             if (lower.includes('statistika') || lower.includes('статистика') || lower.includes('statistic') || lower.includes('reyting') || lower.includes('рейтинг')) {
                 await this.renderAllGroupsStatsCard(ctx, telegramId, lang, false, false);
@@ -533,7 +563,7 @@ class BotManager {
                     const dailyLimit = settings && settings.test_daily_limit !== null ? Number(settings.test_daily_limit) : 1;
                     if (dailyLimit > 0) {
                         const today = (0, index_js_1.getTashkentDate)();
-                        const checkAttempt = await index_js_1.db.query('SELECT COUNT(*) as count FROM daily_test_attempts WHERE telegram_id = $1 AND test_date = $2', [telegramId, today]);
+                        const checkAttempt = await index_js_1.db.query('SELECT COUNT(*) as count FROM daily_test_attempts WHERE telegram_id = $1 AND test_date = $2 AND academy_group_id = $3', [telegramId, today, membership.rows[0].academy_group_id]);
                         const attemptCount = Number(checkAttempt.rows[0]?.count || 0);
                         if (attemptCount >= dailyLimit) {
                             await ctx.reply(`Siz bugungi test limitingizdan to'liq foydalandingiz.\n\n⏳ Sizning limitingiz 00:00 da ochiladi.`);
@@ -583,52 +613,37 @@ class BotManager {
     getAcademyAdminUrl() {
         return config_js_1.config.academyAdminUrl || (config_js_1.config.academyApiUrl ? `${config_js_1.config.academyApiUrl}/admin` : '');
     }
-    /**
-     * Guruh kodini tekshirish
-     */
-    async handleGroupCodeVerification(ctx, telegramId, enteredCode, groupId, lang) {
-        const groupRes = await index_js_1.db.query('SELECT * FROM groups WHERE id = $1', [groupId]);
-        if (groupRes.rows.length === 0) {
-            await ctx.reply("Guruh topilmadi.");
+    async handleAcademyGroupCodeVerification(ctx, telegramId, enteredCode, lang) {
+        try {
+            const firstName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(' ') || 'Telegram o‘quvchi';
+            const access = await (0, academySync_js_1.verifyAcademyGroupCode)(enteredCode, telegramId, firstName);
+            await index_js_1.db.query(`UPDATE users
+         SET academy_group_id = $1, academy_group_name = $2
+         WHERE telegram_id = $3`, [access.group.id, access.group.name, telegramId]);
             this.clearSession(telegramId);
-            return;
+            const bookMessage = access.book
+                ? `\n📖 Guruh kitobi: <b>${access.book.title}</b>`
+                : '\n⚠️ Guruhga hali kitob biriktirilmagan. Test ishlashi uchun admin saytda kitob biriktirishi kerak.';
+            await ctx.reply(`✅ <b>${access.group.name}</b> guruhiga muvaffaqiyatli qo‘shildingiz!\nUzbikiyya akademiyasi o'quvchilari bilan ishlash guruhi.${bookMessage}\n\nEndi botdan foydalanishingiz mumkin.`, { parse_mode: 'HTML', reply_markup: await keyboards_js_1.BotKeyboards.getMainMenu(lang) });
         }
-        const group = groupRes.rows[0];
-        const isCodeValid = group.access_code.trim().toUpperCase() === enteredCode.trim().toUpperCase();
-        if (isCodeValid) {
-            await index_js_1.db.query('UPDATE users SET joined_group_id = $1 WHERE telegram_id = $2', [groupId, telegramId]);
-            this.clearSession(telegramId);
-            let msg = `✅ <b>Tabriklaymiz!</b> Siz muvaffaqiyatli <b>${group.name}</b> guruhiga qabul qilindingiz!`;
-            if (group.telegram_invite_link) {
-                msg += `\n\n👉 <a href="${group.telegram_invite_link}">Guruh havolasiga o'tish</a>`;
-            }
-            await ctx.reply(msg, {
-                parse_mode: 'HTML',
-                reply_markup: await keyboards_js_1.BotKeyboards.getMainMenu(lang),
-            });
-            if (group.telegram_chat_id && this.bot) {
-                try {
-                    await this.bot.api.approveChatJoinRequest(group.telegram_chat_id, telegramId);
-                }
-                catch { }
-            }
-        }
-        else {
-            await ctx.reply("❌ Kod noto'g'ri kiritildi. Iltimos, qaytadan urinib ko'ring:");
+        catch (error) {
+            console.warn('[Academy Sync] Guruh kodini tasdiqlab bo‘lmadi:', error.message);
+            const isInvalidCode = error.message.includes('noto‘g‘ri') || error.message.includes('topilmadi');
+            await ctx.reply(isInvalidCode
+                ? '❌ Kod noto‘g‘ri yoki guruh topilmadi. Saytdagi guruh kodini tekshirib qayta yuboring:'
+                : '❌ Kodni hozir tekshirib bo‘lmadi. Birozdan so‘ng qayta yuboring.');
         }
     }
     /**
      * Guruhlar ro'yxati
      */
     async handleGroupsList(ctx, telegramId, lang) {
-        const groupsRes = await index_js_1.db.query('SELECT id, name, description FROM groups WHERE is_active = TRUE ORDER BY id ASC');
-        if (groupsRes.rows.length === 0) {
-            await ctx.reply("Hozirda faol guruhlar mavjud emas.");
-            return;
-        }
-        const titleMsg = "👥 <b>Mavjud o'quv guruhlari:</b>\nKirish kodini kiritish uchun kerakli guruhni tanlang:";
-        const keyboard = keyboards_js_1.BotKeyboards.createGroupsKeyboard(groupsRes.rows);
-        await ctx.reply(titleMsg, { parse_mode: 'HTML', reply_markup: keyboard });
+        this.getSession(telegramId).state = 'waiting_group_code';
+        await ctx.reply(lang === 'ru'
+            ? 'Введите код группы из единой панели сайта:'
+            : lang === 'en'
+                ? 'Enter the group code shown in the website admin panel:'
+                : 'Sayt admin panelidagi guruh kodini yuboring:');
     }
     /**
      * BARCHA GURUHLAR STATISTIKASI VA REYTINGI
@@ -734,46 +749,34 @@ class BotManager {
      * Test boshlash (Band 1 & 5: Kitob va mavzular asosida qattiq test, umumiy xato xabarisiz)
      */
     async startQuiz(ctx, telegramId, lang, isDaily = true) {
-        const waitMsg = await ctx.reply("⏳ <i>Arab tili test savollari tayyorlanmoqda...</i>", { parse_mode: 'HTML' });
+        const waitMsg = await ctx.reply("⏳ Guruhingiz kitobi asosida test tayyorlanmoqda...", { parse_mode: 'HTML' });
         try {
-            // 1. Foydalanuvchi ilgari to'g'ri yechgan savollar ro'yxatini olamiz (qayta takrorlanmasligi uchun)
+            const userResult = await index_js_1.db.query('SELECT academy_group_id FROM users WHERE telegram_id = $1', [telegramId]);
+            const groupId = Number(userResult.rows[0]?.academy_group_id);
+            if (!Number.isSafeInteger(groupId) || groupId <= 0) {
+                await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, 'Test uchun saytda guruhingizga kitob biriktirilmagan. Iltimos, admin bilan bog‘laning.');
+                return;
+            }
+            const book = await (0, academySync_js_1.getAcademyGroupBook)(groupId, telegramId);
             const prevCorrectRes = await index_js_1.db.query(`SELECT DISTINCT question FROM user_quiz_history 
-         WHERE telegram_id = $1 AND is_correct = TRUE 
-         ORDER BY question ASC LIMIT 50`, [telegramId]);
+         WHERE telegram_id = $1 AND academy_group_id = $2 AND is_correct = TRUE
+         ORDER BY question ASC LIMIT 50`, [telegramId, groupId]);
             const excludedQuestions = prevCorrectRes.rows.map((r) => r.question);
-            // 2. Admin panelda sozlangan test parametrlarini yuklaymiz
-            const tSettingsRes = await index_js_1.db.query('SELECT * FROM test_settings LIMIT 1');
-            const tSettings = tSettingsRes.rows[0];
-            const bookText = tSettings?.book_text || undefined;
-            const topicsRange = tSettings?.selected_topics || 'all';
-            let questionTypes = undefined;
-            try {
-                if (tSettings?.question_types) {
-                    questionTypes = typeof tSettings.question_types === 'string'
-                        ? JSON.parse(tSettings.question_types)
-                        : tSettings.question_types;
-                }
-            }
-            catch { }
-            const qCount = tSettings?.question_count ? Number(tSettings.question_count) : 5;
-            let questions = [];
-            try {
-                questions = await gemini_js_1.GeminiService.generateHardTestQuestions({
-                    bookText,
-                    topicsRange,
-                    questionTypes,
-                    count: qCount,
-                    excludedQuestions,
-                    lang,
-                });
-            }
-            catch (genErr) {
-                console.warn('generateHardTestQuestions error, fallback questions ishlatiladi:', genErr);
-                questions = gemini_js_1.GeminiService.getFilteredFallbackQuestions(lang, excludedQuestions).slice(0, qCount);
-            }
-            if (!questions || questions.length === 0) {
-                questions = gemini_js_1.GeminiService.getFilteredFallbackQuestions(lang).slice(0, qCount);
-            }
+            const latestResult = await index_js_1.db.query(`SELECT level FROM user_tests
+         WHERE telegram_id = $1 AND academy_group_id = $2
+         ORDER BY created_at DESC LIMIT 1`, [telegramId, groupId]);
+            const lastLevel = String(latestResult.rows[0]?.level || '').toUpperCase();
+            const difficulty = lastLevel === 'B2'
+                ? 'hard'
+                : lastLevel === 'B1' ? 'medium' : 'easy';
+            const questions = await gemini_js_1.GeminiService.generateHardTestQuestions({
+                bookText: book.text,
+                topicsRange: 'all',
+                count: 5,
+                excludedQuestions,
+                lang,
+                difficulty,
+            });
             const session = this.getSession(telegramId);
             session.state = 'taking_test';
             session.testQuestions = questions;
@@ -781,20 +784,12 @@ class BotManager {
             session.testCurrentIndex = 0;
             session.testScore = 0;
             session.isDailyTest = isDaily;
+            session.testAcademyGroupId = groupId;
             await this.sendNextQuizQuestion(ctx, telegramId, session, lang, waitMsg.message_id);
         }
-        catch (err) {
-            console.error('startQuiz xatoligi (Band 1 bo\'yicha zaxira):', err);
-            // Agar qandaydir kutilmagan xato bo'lsa ham umumiy xato xabari chiqmasin, zaxira savollari bilan test boshlanadi
-            const fallbackQuestions = gemini_js_1.GeminiService.getFilteredFallbackQuestions(lang).slice(0, 5);
-            const session = this.getSession(telegramId);
-            session.state = 'taking_test';
-            session.testQuestions = fallbackQuestions;
-            session.testAttempts = [];
-            session.testCurrentIndex = 0;
-            session.testScore = 0;
-            session.isDailyTest = isDaily;
-            await this.sendNextQuizQuestion(ctx, telegramId, session, lang, waitMsg.message_id);
+        catch (error) {
+            console.error('Kitob asosidagi testni tayyorlab bo‘lmadi:', error.message);
+            await ctx.api.editMessageText(ctx.chat.id, waitMsg.message_id, 'Kitob asosidagi testni tayyorlab bo‘lmadi. Guruhingizga kitob biriktirilgani va Gemini sozlamalari to‘g‘riligini admin bilan tekshiring.');
         }
     }
     async sendNextQuizQuestion(ctx, telegramId, session, lang, editMessageId) {
@@ -867,34 +862,34 @@ class BotManager {
         const percentage = Math.round((score / total) * 100);
         let level = 'A1';
         let levelTitle = "A1 Boshlang'ich Daraja";
-        let comment = "Arab tili harflari, tovushlar va asosiy so'z boyligini mustahkamlash tavsiya etiladi.";
+        let comment = "Kitobdagi mavzularni qayta ko‘rib, zamonaviy arab tilidagi kundalik ibora va tuzilmalarni mashq qiling.";
         if (percentage >= 80) {
             level = 'B2';
             levelTitle = "B2 Yuqori Daraja";
-            comment = "Ajoyib natija! Murakkab nahv, sarf va erkin suhbat darajasi.";
+            comment = "Ajoyib natija! Keyingi testda kitob mavzulari chuqurroq va murakkabroq tekshiriladi.";
         }
         else if (percentage >= 60) {
             level = 'B1';
             levelTitle = "B1 O'rta-Yuqori Daraja";
-            comment = "Yaxshi natija! Sarf va jumlalar tahliliga ko'proq e'tibor qarating.";
+            comment = "Yaxshi natija! Kitobdagi grammatik tuzilmalar va matn mazmunini mustahkamlang.";
         }
         else if (percentage >= 40) {
             level = 'A2';
             levelTitle = "A2 O'rta Daraja";
-            comment = "Qoniqarli! Grammatika va lug'at ustida ishlashni davom ettiring.";
+            comment = "Kitobdagi asosiy matnlar, iboralar va lug‘atni qayta mashq qiling.";
         }
         // Natijani bazaga yozish (Band 1: Test xatosi bo'lsa ham hech qachon yiqilmasdan yakunlansin)
         try {
             const userRes = await index_js_1.db.query('SELECT id FROM users WHERE telegram_id = $1', [telegramId]);
             const userId = userRes.rows[0]?.id;
             if (userId) {
-                await index_js_1.db.query(`INSERT INTO user_tests (user_id, telegram_id, score, total_questions, percentage, level, recommended_course)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`, [userId, telegramId, score, total, percentage, level, levelTitle]);
+                await index_js_1.db.query(`INSERT INTO user_tests (user_id, telegram_id, academy_group_id, score, total_questions, percentage, level, recommended_course)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [userId, telegramId, session.testAcademyGroupId, score, total, percentage, level, levelTitle]);
             }
             if (session.isDailyTest) {
                 const today = (0, index_js_1.getTashkentDate)();
-                await index_js_1.db.query(`INSERT INTO daily_test_attempts (telegram_id, test_date, score, total)
-           VALUES ($1, $2, $3, $4)`, [telegramId, today, score, total]);
+                await index_js_1.db.query(`INSERT INTO daily_test_attempts (telegram_id, academy_group_id, test_date, score, total)
+           VALUES ($1, $2, $3, $4, $5)`, [telegramId, session.testAcademyGroupId, today, score, total]);
             }
         }
         catch (dbErr) {
@@ -922,13 +917,23 @@ class BotManager {
     /** AI Ustoz uchun saytga yuklangan kitobni tanlash */
     async handleAITutorStart(ctx, telegramId, lang) {
         const session = this.getSession(telegramId);
-        let books;
+        let book;
         try {
-            books = await (0, academySync_js_1.getAcademyBooks)();
+            const membership = await index_js_1.db.query('SELECT academy_group_id FROM users WHERE telegram_id = $1', [telegramId]);
+            const groupId = Number(membership.rows[0]?.academy_group_id);
+            if (!Number.isSafeInteger(groupId) || groupId <= 0) {
+                await ctx.reply(lang === 'ru'
+                    ? 'Для вашей группы администратор ещё не назначил книгу.'
+                    : lang === 'en'
+                        ? 'Your group does not have an assigned book yet.'
+                        : 'Guruhingizga hali kitob biriktirilmagan. Admin bilan bog‘laning.');
+                return;
+            }
+            book = await (0, academySync_js_1.getAcademyGroupBook)(groupId, telegramId);
         }
         catch (error) {
             this.clearSession(telegramId);
-            console.error('[AI Tutor] Saytdagi kitoblar ro‘yxatini olib bo‘lmadi:', error.message);
+            console.error('[AI Tutor] Guruh kitobini olib bo‘lmadi:', error.message);
             await ctx.reply(lang === 'ru'
                 ? 'Не удалось получить список книг с сайта. Попробуйте позже.'
                 : lang === 'en'
@@ -936,26 +941,21 @@ class BotManager {
                     : 'Saytdagi kitoblar ro‘yxatini olib bo‘lmadi. Keyinroq qayta urinib ko‘ring.');
             return;
         }
-        books = books.filter((book) => Number.isSafeInteger(book.id) && book.title?.trim() && book.pdfPath?.trim());
-        if (books.length === 0) {
-            this.clearSession(telegramId);
-            await ctx.reply(lang === 'ru'
-                ? 'Пока нет загруженных книг с распознанным текстом. Попросите администратора загрузить книгу.'
-                : lang === 'en'
-                    ? 'There are no uploaded books with readable text yet. Ask the administrator to upload a book.'
-                    : 'Hozircha matni o‘qiladigan yuklangan kitob yo‘q. Admindan kitob yuklashni so‘rang.');
+        if (!book)
             return;
-        }
         session.state = 'selecting_ai_tutor_book';
-        session.activeTutorBookId = undefined;
-        session.activeTutorBookTitle = undefined;
-        session.activeTutorBookContent = undefined;
+        session.activeTutorBookId = book.id;
+        session.activeTutorBookTitle = book.title;
+        session.activeTutorBookContent = book.text.slice(0, 16000);
         session.activeTutorQuestion = undefined;
-        const prompt = lang === 'ru' ? 'Для начала выберите книгу:' :
-            lang === 'en' ? 'Choose a book to begin:' :
-                'Boshlash uchun kitobni tanlang:';
-        await ctx.reply(prompt, {
-            reply_markup: keyboards_js_1.BotKeyboards.getTutorBooksKeyboard(books.map((book) => ({ id: book.id, title: book.title })), lang),
+        const startText = lang === 'ru'
+            ? `Урок по книге «${book.title}» начнётся сейчас.`
+            : lang === 'en'
+                ? `Your lesson from "${book.title}" is ready.`
+                : `<b>${book.title}</b> kitobi asosida dars boshlanmoqda.`;
+        await ctx.reply(startText, {
+            parse_mode: 'HTML',
+            reply_markup: keyboards_js_1.BotKeyboards.getTutorBooksKeyboard([{ id: session.activeTutorBookId, title: book.title }], lang),
         });
     }
     /**

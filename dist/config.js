@@ -19,7 +19,7 @@ exports.config = {
     adminPort: parseInt(process.env.ADMIN_PORT || '3000', 10),
     adminPanelUrl: process.env.ADMIN_PANEL_URL || 'http://localhost:3000',
     databaseUrl: (process.env.BOT_DATABASE_URL || process.env.DATABASE_URL || '').trim(),
-    databaseSchema: (process.env.BOT_DATABASE_SCHEMA || '').trim(),
+    databaseSchema: (process.env.BOT_DATABASE_SCHEMA || (process.env.BOT_DATABASE_URL || process.env.DATABASE_URL ? 'arab_bot' : '')).trim(),
     botToken: (process.env.BOT_TOKEN || '').trim(),
     geminiApiKey: (process.env.GEMINI_API_KEY || '').trim(),
     geminiApiKey2: (process.env.GEMINI_API_KEY_2 || '').trim(),
@@ -42,7 +42,7 @@ function reloadConfig() {
     exports.config.adminPort = parseInt(process.env.ADMIN_PORT || '3000', 10);
     exports.config.adminPanelUrl = process.env.ADMIN_PANEL_URL || 'http://localhost:3000';
     exports.config.databaseUrl = (process.env.BOT_DATABASE_URL || process.env.DATABASE_URL || '').trim();
-    exports.config.databaseSchema = (process.env.BOT_DATABASE_SCHEMA || '').trim();
+    exports.config.databaseSchema = (process.env.BOT_DATABASE_SCHEMA || (process.env.BOT_DATABASE_URL || process.env.DATABASE_URL ? 'arab_bot' : '')).trim();
     exports.config.botToken = (process.env.BOT_TOKEN || '').trim();
     exports.config.geminiApiKey = (process.env.GEMINI_API_KEY || '').trim();
     exports.config.geminiApiKey2 = (process.env.GEMINI_API_KEY_2 || '').trim();
