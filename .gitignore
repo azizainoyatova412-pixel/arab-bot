@@ -5,3 +5,4 @@ data
 *.db
 data/*
 .env.example
+dist
