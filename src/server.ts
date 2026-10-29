@@ -1,3 +1,4 @@
+console.log("VERSION 29-OKT-A-2024");
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import fs from 'fs';
